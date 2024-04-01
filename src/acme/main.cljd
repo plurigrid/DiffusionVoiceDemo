@@ -1,0 +1,59 @@
+(ns acme.main
+  (:require
+   ["package:flutter/widgets.dart" :as w]
+   [tilton.mx.cell.base :as cty]
+   [tilton.mx.model.core :as md]
+   [tilton.mx.util :as mxu]
+   [tilton.mx.base
+    :refer [wtrx dp dpx trx *fx$dpk*]]
+   [tilton.mx.api :refer [navdbg minfo cinfo] :as mx]
+   [tilton.fmx.factory :refer [fx$sst-registry-clear]]
+   [tilton.fmx.api :as fx]
+   [tilton.testing :as testing]
+   [acme.home :as home]
+   #_[learn.counter.counter-fmx :as l-ctr]))
+
+(defn main []
+  (binding [*async-error-handler* (fn [exc stack-trace]
+                                    (dp :OUTER-ASYNC-ERROR-TRAPS!! exc)
+                                    (dp :OUTER-ASYNC-ERROR-stack-trace!! stack-trace))
+            *print-level* 5
+            *print-length* 10
+            *print-readably* true]
+    (dp :main-entry--------------------------------------------)
+
+    (fx/initialize)
+
+    (binding [cty/*dpc-enabled* true]
+      ; *fx$dpk* [:propagate :pulse :cset :cnset bbuild :bbuild+ :gg :sstate :sstate+]
+      (.ensureInitialized w/WidgetsFlutterBinding)
+      (if false
+        (l-ctr/main)
+        (fx/run-fx-app-hot
+         (home/make-app))))
+
+    #_(testing/run-tests)))
+
+#_ (when (not (fx/is-web?))
+       (dp :platform-processors io/Platform.numberOfProcessors))
+
+;; (set! r/debugPaintSizeEnabled true)
+;; (w/debugDumpApp)
+
+(defn sample-debugger [opcode data]
+  (case opcode
+    :mark-rebuild-unless-defunct
+    (do) #_(let [{:keys [cell element]} data]
+             (dp :adtata data)
+             (dp :cell (cinfo cell))
+             (dp :cellkeys (keys @cell))
+             (let [elt ^w/Element element]
+               (when (not (and (.-mounted elt)
+                            (.-debugIsActive elt)
+                            (not (.-debugIsDefunct elt))))
+                 (dp :rebld-DEAD-ELT-me!!! (minfo (:me @cell)))
+                 (dp :rebld-mounted (.-mounted elt))
+                 (dp :rebld-active (.-debugIsActive elt))
+                 (dp :rebld-sees-defunct (.-debugIsDefunct elt))
+                 (dp :rebld-elt-str (.toString elt)))))
+    (dp :unrecognized-debug-opcode opcode data)))

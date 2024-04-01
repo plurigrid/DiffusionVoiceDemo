@@ -1,0 +1,79 @@
+(ns tilton.mx.cell.synapse
+  (:require
+    [tilton.mx.model.peek :refer [chk mref? minfo]]
+    [tilton.mx.base :refer [dp]]
+    [tilton.mx.util :refer [ pln rmap-set!]]
+
+    [tilton.mx.cell.base
+     :refer [*depender* c-synapses c-prop c-useds]]
+
+    [tilton.mx.cell.integrity
+     :refer [with-integrity]]
+
+    [tilton.mx.cell.evaluate :refer [ cget c-value-assume
+                                     record-dependency ensure-value-is-current]]
+
+    [tilton.mx.cell.observer :refer [fn-obs]]
+
+    [tilton.mx.cell.core
+     :refer [cI make-c-formula c-fn]]))
+
+(defn existing-syn [synapse-id]
+  (chk (keyword? synapse-id) "Synapse ID must be a keyword")
+  (chk *depender* (str "You attempted to create synapse " synapse-id " outside a Cell formula. Synapses serve containing Cells."))
+  (some #(when (= synapse-id (:synapse-id (deref %))) %)
+    (c-synapses *depender*)))
+
+(defmacro with-synapse [[synapse-id [& closure-bindings]] & body]
+  `(let [existing-syn# (existing-syn ~synapse-id)
+         synapse# (or existing-syn#
+
+                    (let [new-syn#
+                          (let [~@closure-bindings]
+                            ;; (dp :making-syn!? (:prop @*depender*))
+                            (make-c-formula
+                              :model (:model @*depender*)
+                              :prop ~synapse-id
+                              :synapse-id ~synapse-id
+                              :code '~body
+                              :synaptic? true
+                              :rule (c-fn ~@body)))]
+                      ;;(dp :built-synapse!!!!!!!!!!!!!!!! ~synapse-id @new-syn#)
+                      (rmap-set! [:synapses *depender*]
+                        (conj (c-synapses *depender*) new-syn#))
+                      (record-dependency new-syn#)        ;; needed?!!!!
+                      ;; (dp :made-syn!!!!!!!!!!!! @new-syn#)
+                      new-syn#))
+
+         value# (tilton.mx.cell.integrity/with-integrity ()
+                  ;; (dp :with-syn-ensure-syn-value (nil? existing-syn#))
+                  (ensure-value-is-current synapse# :synapse *depender*))]
+     ;;(dp :synapse-returns ~synapse-id :useds (doall (map c-prop (c-useds synapse#))))
+     (record-dependency synapse#)
+     value#))
+
+(defn call-with-synapse [synapse-id cell-factory]
+  (let [existing-syn (existing-syn synapse-id)
+        synapse (or existing-syn
+                  (let [new-syn (cell-factory)]
+                    (dp :building-synapse ~synapse-id)
+                    (rmap-set! [:synapses *depender*]
+                      (conj (c-synapses *depender*) new-syn))
+                    (record-dependency new-syn)           ;; needed?!!!!
+                    new-syn))
+
+        value (tilton.mx.cell.integrity/with-integrity ()
+                (ensure-value-is-current synapse :synapse *depender*))]
+    (record-dependency synapse)
+
+    value))
+
+(defmacro cSyn [[synapse-id [& closure-bindings]] & body]
+  `(call-with-synapse ~synapse-id #(let [~@closure-bindings]
+                                     (make-c-formula
+                                       :model (c-model *depender*)
+                                       :prop ~synapse-id
+                                       :synapse-id ~synapse-id
+                                       :code '~body
+                                       :synaptic? true
+                                       :rule (c-fn ~@body)))))

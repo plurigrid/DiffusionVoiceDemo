@@ -1,0 +1,79 @@
+(ns tilton.mx.cell.observer
+  (:require
+    [tilton.mx.foundation :refer [observe mx-type] :as mx]
+    [tilton.mx.base
+     :refer [trx dpx dp mx-throw]]
+
+    [tilton.mx.util
+     :refer [cl-find set-ify atom?
+             make-fifo-queue fifo-empty? fifo-peek fifo-pop
+             fifo-data fifo-add rmap-set!]
+     :as ut]
+
+    [tilton.mx.cell.base
+     :refer [ unbound
+             +pulse+ c-prop c-value c-mname
+             c-model] :as cty]
+
+    [tilton.mx.model.peek :refer [chk md-type mref? minfo cinfo cref?]]
+
+    ["package:flutter/widgets.dart" :as w
+     :refer [Text Center Expanded Column State StatefulWidget StatelessWidget]]))
+
+(def +observe-method+ (atom {}))
+
+(defn observer-register [key observer]
+  (prn :watch-reg key)
+  (swap! +observe-method+ assoc key observer))
+
+(def +observe-default-handler+ (atom nil))
+
+(defn observer-get [key]
+  (get @+observe-method+ key))
+
+(defn fx-observe [prop-name me new-val old-val c]
+  (chk me (str "model observe invoked for standalone cell? " (cinfo c)))
+  (dpx :watch-oskool prop-name (minfo me) )
+
+  (when-let [obs (:fx$observer @me)]
+    ;; note that we carry on with generic observe after specific observe
+    (do (dpx :oskool-using-obj-observer (minfo me))
+        (obs prop-name me new-val old-val c)))
+
+  (when-let [obs (observer-get (mx-type me))]
+    (do (dpx :oskool-using-type-obs prop-name (mx-type me))
+        (obs prop-name me new-val old-val c))))
+
+(defmacro fn-obs
+  "Shortcut definer for cell-specific observers.
+body can be multiple sexprs with access to
+call parameters: prop, me, new, old, and c."
+  [& body]
+  `(fn [~'prop ~'me ~'new ~'old ~'c]
+     ~@body))
+
+(defn c-observe
+  ([c why]
+   (c-observe c unbound why))
+
+  ([c prior-value why]
+   (chk (cref? c) (str "cref? fail on c-observe" (cinfo c)))
+   (chk (dart/is? @+pulse+ int))
+   (dpx :c-observe> why (cinfo c))
+
+   (rmap-set! [:pulse-observed c] @+pulse+)
+   (when-let [me (c-model c)] ;; not in standalone cells, mostly in test suite
+     ;; we do observes specified for types or slots...
+     (fx-observe (c-prop c) me (c-value c) prior-value c)
+
+     (when-let [md-type (md-type (c-model c))]
+       (mx/observe md-type (c-prop c) me (c-value c) prior-value c)))
+
+   ;; ...and also do observes specified ad hoc on the cI/cF call.
+   ;; nb that we do not want ad hoc observers to shadow those specified generically
+   ;; indeed, in Lisp observers are progn methods -- they all run.
+   (when-let [cell-observer (:obs @c)]
+     (cell-observer (c-prop c) (c-model c) (c-value c) prior-value c))))
+
+
+

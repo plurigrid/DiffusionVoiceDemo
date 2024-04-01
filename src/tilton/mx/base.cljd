@@ -1,0 +1,143 @@
+(ns tilton.mx.base
+  (:require [clojure.string :as str]))
+
+(defn mx-throw [& bits]
+  (let [emsg (str/join " " bits)]
+    ;(dp :MXTHROW!! emsg) ;; flutter_tts traps/hides handler exceptions
+    (throw (Exception emsg))))
+
+(defn trc [x]
+  (dart:core/print (str "trx> " x)))
+
+;; --- easy access to maps in refs, BYPASSING mget (use def-mx-props for that) ----
+
+(defmacro def-rmap-props [reader-prefix & slots]
+  `(do
+     ~@(map (fn [prop#]
+              `(defn ~(symbol (str (or reader-prefix "")
+                                prop#))
+                 [~'ref]
+                 (~(keyword prop#) @~'ref))) slots)))
+
+(defmacro def-rmap-meta-props [reader-prefix & slots]
+  `(do
+     ~@(map (fn [prop#]
+              `(defn ~(symbol (str (or reader-prefix "")
+                                prop#))
+                 [~'ref]
+                 (~(keyword prop#) (meta ~'ref)))) slots)))
+
+;; ---- debug print statement options ---------------------
+
+(def ^:dynamic *trx?* true)
+
+#_(alter-var-root #'*trx?* not)
+
+(def ^:dynamic *trc-ensure* nil)
+(def ^:dynamic *trx-path-id* nil)
+(def ^:dynamic *trdeep* 0)
+(def ^:dynamic *txran* 0)
+(def last-trc (atom 0))                                     ;; s/b universal time
+
+(defn call-trc$ [s bits]
+  (str s ": " (str/join ", " bits)))
+
+
+(defn call-trc [s & os]
+  ;; (break) ;; uncomment to escape loop
+  (when *trx?*
+    (when s
+      (dp (call-trc$ s os)))))
+
+(defmacro trx [label & vals]
+  `(call-trc ~(when (not (nil? label))
+                (str label))
+     ~@vals))
+
+;;;----------------------------------------
+
+
+
+(defn dp [& bits]
+  (when-not false                                           ;; (nil? (first bits))
+    (dart:core/print (str/join " - " (list*                 ;:DPR
+                                       ;*trdeep*
+                                       (apply str (repeat *trdeep* "."))
+                                       (map #(if (nil? %) :NIL %) bits))))))
+
+(defmacro dpx [& bits]
+  `(do))
+
+(defn dprn [& bits]
+  (when-not (nil? (first bits))
+    (dart:core/print (str/join " - " (list* :DPR
+                                       *trdeep*
+                                       (apply str (repeat *trdeep* "."))
+                                       bits)))))
+(defn dprnx [& bits])
+
+;;; --- dpk ---------------------------------------------------------
+
+;;; yet another debug hack
+
+(def ^:dynamic *fx$dpk* "vector of keys to match" [])
+
+(defn dpk-keys []
+  *fx$dpk*)
+
+(defn dpk-match [kw-or-kws]
+  ;(dp :dpkmatch keys *dpk* (dpk-keys))
+  (if (keyword? kw-or-kws)
+    (dpk-match [kw-or-kws])
+    (some (fn [k] (some #{k} (dpk-keys))) kw-or-kws)))
+
+#_#_
+(defmacro dpkx [& r]
+  `(do))
+
+(defmacro dpk [kw-or-kws & dp-bits]
+  ;(dp :dpk-sees kw-or-kws dp-bits)
+  `(tilton.mx.cell.base/without-c-dependency
+     (dp :dpk-sees ~kw-or-kws)
+     (when-let [m# (tilton.mx.base/dpk-match ~kw-or-kws)]
+       (tilton.mx.base/dp m# ~@dp-bits))))
+
+;;; --- detritus --------------------------------------------------------
+
+(def wtrx-id (atom 0))
+
+(defn bail-hi [hi]
+  (mx-throw
+    (str "wtrx depth " *trdeep* " exceeded max depth " hi ":"
+      #_(apply call-trc$ (first trxargs)
+          (rest trxargs)))))
+
+(defn call-wtrx [fn lo hi trxargs]
+  (let [xid (swap! wtrx-id inc)]
+    (binding [*trdeep* (inc *trdeep*)]
+      (cond
+        (<= lo *trdeep* hi)
+        (apply call-trc trxargs)
+
+        (> *trdeep* 5)
+        (do (dp :throwing xid)
+            (bail-hi hi))
+
+        :else (dp :ignoring-wtrx-id xid [lo *trdeep* hi]
+                (first trxargs) (<= lo *trdeep* hi) (<= 0 1 999)))
+      (fn))))
+
+(defmacro wtrx [[lo hi & trxargs] & body]
+  ;`(do ~@body)
+  `(call-wtrx (fn [] ~@body) ~lo ~hi (list ~@trxargs)))
+
+(defmacro prog1 [& body]
+  `(let [result# ~(first body)]
+     ~@(rest body)
+     result#))
+
+(defmacro prog1 [& body]
+  `(let [result# ~(first body)]
+     ~@(rest body)
+     result#))
+

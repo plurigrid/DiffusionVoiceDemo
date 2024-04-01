@@ -1,0 +1,172 @@
+(ns tilton.mx.model.peek
+  (:require
+    [cljd.string :as str]
+    ["package:flutter/foundation.dart" :as fd]
+    [tilton.mx.foundation :refer [MXImplementer PObserver mx-type]]))
+
+
+(def ^:dynamic *mx*
+  "An edge fron the matrix, implemented as vector of
+  a Model and a property name."
+  nil)
+
+(defn mx-md [mx]
+  (first mx))
+(defn mx-prop [mx]
+  (second mx))
+
+(defmacro mmx-md [& [me]]
+  (let [me (or me 'me)]
+    `(first (:mx @~me))))
+(defmacro mmx [& [me]]
+  (let [me (or me 'me)]
+    `(:mx @~me)))
+
+;; --- assertions ---------------------------
+(defn flutter-release-mode []
+  fd/kReleaseMode)
+
+(defn call-chk [condition & bits]
+  (when-not condition
+    (throw (Exception. (str "CHK> FAIL!!!: "(str/join " - " bits))))))
+
+(defmacro chk [test & bits]
+  #_ `(do)
+  `(when-not (tilton.mx.model.peek/flutter-release-mode)
+       ;(dp :chk-of '~test)
+       (tilton.mx.model.peek/call-chk ~test '~test ~@bits)))
+
+(defn dp [& bits]
+  (when-not false                                           ;; (nil? (first bits))
+    (dart:core/print [:DP (first bits)])
+    (dart:core/print (str/join " - " (list* :DP
+                                            (map #(cond (nil? %) :NIL
+                                                        (mref? %) (minfo %)
+                                                        (cref? %) (cinfo %)
+                                                        :else %)
+                                                 bits))))))
+
+(defn atom? [x]
+  (dart/is? x cljd.core/Atom))
+
+(defn dbgval [x]
+  (cond
+    (sequential? x) (mapv dbgval x)
+    (mref? x) (minfo x)
+    (cref? x) (cinfo x)
+    (atom? x) :atom
+    :else x))
+
+;;; --- core MX ------------------------------
+;;;
+
+(deftype Cell []
+  :extends MXImplementer)
+
+(deftype CellFormula []
+  :extends Cell)
+
+(defn c-type [c]
+  (when (atom? c)
+    (:mx-type @c)))
+
+(defn cref? [c]
+  (and c (atom? c) (c-type c)
+       (dart/is? (c-type c) Cell)))
+
+(defn c-mname [c]
+  (if-let [md (:me @c)]
+    (or (:name @md)
+        "anon")
+    "no-md"))
+
+(defn cinfo
+  ([c] (cinfo c false))
+  ([c verbose?]
+   (cond
+     (nil? c) :null-c
+     (not (atom? c)) (if verbose? [:not-atom-c c]
+                                  :not-atom-c)
+
+     (not (cref? c)) (if verbose? [:not-cell-c #_@c :meta (meta c)]
+                                  :not-cell-c)
+     (:quiesced? @c) [:QUIESCED #_@c]
+     :else (if verbose?
+             [:cinfo-all]
+
+             (conj ((juxt :prop #_c-async? #_c-value) (deref c))
+                   :val (dbgval (:value (deref c)))
+                   :mname (c-mname c)
+                   :pulse/lastchg ((juxt :pulse :pulse-last-changed) @c)
+                   :used/users [(count (:useds @c))
+                                (count (:callers @c))])))))
+
+(deftype Model []
+  :extends MXImplementer
+  PObserver
+  (observe [this prop me new-value prior-value cell]
+    #_(dp :Model-not-observing (cinfo cell))))
+
+(defn md-type
+  ([md] (md-type md :anon))
+  ([md tag]
+   (chk md
+        (str "md-type> argument null: " tag))
+   (chk (atom? md)
+        (str "md-type> argument not atom " tag))
+   (chk (map? @md)
+        (str "md-type> argument atom not map deref: " "<<<<deref: " tag))
+   (mx-type md)))
+
+(defn mname [me]
+  (:name @me))
+
+;; --- defmodel rizing ---------------------
+
+(defn mref?
+  ([x]
+   (mref? x :anon))
+  #_(when (and x (atom? x))
+      (dp :mref-sees (md-type x) (meta x)))
+  ([x tag]
+   (and x (atom? x)
+        (dart/is? (md-type x tag) Model))))
+
+;; --- md-quiesced? ---
+
+(defn md-quiesced? [md]
+  (if-let [m (meta md)]
+    (= :md-quiesced (:state m))
+    false))
+
+(defn minfo
+  ([md]
+   (minfo md false))
+  ([md verbose]
+   (cond
+     (nil? md) :null-md
+     (not (atom? md)) :not-atom-md
+     (cref? md) (do
+                  (dp :minfo-passed-cell (cinfo md))
+                  :md-is-cell)
+     (not (mref? md)) (do
+                        (dp :atom-not-md-keys (keys @md))
+                        (dp :atom-not-md-keys-meta (meta md))
+
+                        ;(dp :atom-not-md-c @md)
+                        :atom-not-md-c)
+     :else (if verbose
+             [(:name @md) (meta md)]
+             [:MI (or (:name @md) :anon)
+              :fxc (:fx-class @md)
+              :state (:state (meta md))
+              :sid (:sid (meta md))
+              ;:mxtype (mx-type md)
+              ]))))
+
+;; --- quiescing --------------------
+
+(def ^:dynamic *md-quiescing* false)
+
+
+

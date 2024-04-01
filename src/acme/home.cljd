@@ -1,0 +1,90 @@
+(ns acme.home
+  "Originally, a straight port of the `flutter_tts` package example https://github.com/dlutton/flutter_tts/blob/master/example/lib/main.dart"
+  (:require
+   ["package:flutter/material.dart" :as m]
+   ["package:deepgram_speech_to_text/deepgram_speech_to_text.dart" :as deepgram]
+   ["package:mic_stream/mic_stream.dart" :as micstream]
+   ["dart:convert" :as convert]
+   [tilton.mx.api :as mx
+    :refer [dp dpx cI cF cF+ cF+n cFn cFonce mget mget? mset! mswap! minfo fasc fasc-inc
+            fm* mav mx-bound? cinfo]]
+   [tilton.fmx.factory :refer [deftag deftags deftags-plus] :as fxf]
+   [tilton.fmx.api :as fx
+    :refer [scaffold app-bar text center column hero material-app
+            container row expanded icon padding opacity
+            icon-button fx-render dart-cb selection-area]]))
+
+
+(def params
+  {"model" "nova-2-general"
+   "language" "en"
+   "filler_words" false
+   "punctuation" true})
+
+(def deep-gram-api-key <INSERT API KEY>)
+
+;; init listening stream
+;; Stream<List<int>> stream = await MicStream.microphone(sampleRate: 44100); ;; DART CODE
+(defn init-mic-stream [] 
+  (.shouldRequestPermission micstream/MicStream true)
+  (.listen (micstream/MicStream.microphone .sampleRate 44100) (fn [result] result))
+  )
+
+;; init deep gram
+(defn init-deepgram [api-key params] (deepgram/Deepgram api-key .baseQueryParams params))
+
+
+;; send the mic-stream to the api using the deepgram class
+(defn deep-stream [deepgram mic-stream]
+  println mic-stream
+  ;; (cF+
+  ;;  [:watch (fn [_ _ new-value _ _]
+  ;;              ; Make your invokeMethod calls here.
+  ;;            (println "Stream returned:" new-value))]
+  ;;  )
+  ;; (.transcribeFromLiveAudioStream deepgram (.-stream mic-stream))
+  )
+
+
+(defn make-app []
+  (material-app {} 
+      {:name          :app
+       :deepgramapikey deep-gram-api-key
+       :params        params             
+       :mic-stream    (init-mic-stream)
+       :dg-class      (init-deepgram deep-gram-api-key params)
+       :dg-stream     (cF+
+                       [:watch (fn [_ _ new-value _ _]
+                         ; first time nil, 
+                         ; then Stream<List<int>>
+                                 (when-not (nil? new-value)
+                                   (println "Stream returned:" new-value)))]
+                       (deep-stream (mget me :dg-class) (mget me :mic-stream)))
+       }
+               (selection-area
+                (scaffold
+                 {:appBar (app-bar {:title (m/Text "TopOS Demo")})}
+                 (column {:crossAxisAlignment m/CrossAxisAlignment.stretch}
+                         (container
+                          {;:color m/Colors.yellow
+                           :padding (m/EdgeInsets.symmetric .horizontal 16.0)}
+                          (fx/text {:textAlign m/TextAlign.center}
+                                   {:name     :textinput}
+                                   (mget (fasc :app) :deepgramapikey)))
+                         (fx/sized-box {:height 30})
+                         (fx/gesture-detector
+                          {:onTap (dart-cb [] (do
+                                                ;; (await (init-mic-stream))
+                                                (println "tapped")))}
+                          (container
+                           {:margin (m/EdgeInsets.only .bottom 24)
+                            :decoration (m/BoxDecoration
+                                         .border (.all m/Border .width 0.5)
+                                         .borderRadius (m/BorderRadius.all (m.Radius/circular 4.0)))}
+                           (fx/text {:textAlign m/TextAlign.center}
+                                    {:name     :start-mic-butt}
+                                    "Start Mic")))
+
+                         (fx/text {:textAlign m/TextAlign.center}
+                                  {:name     :textinput}
+                                  (str (mget (fasc :app) :params))))))))

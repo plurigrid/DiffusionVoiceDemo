@@ -1,0 +1,503 @@
+(ns tilton.fmx.api
+  (:require
+    ["dart:io" :as io]
+    ["package:flutter/foundation.dart" :as foundation]
+    ["package:flutter/material.dart" :as m
+     :refer [MaterialApp Widget Scaffold MainAxisAlignment Colors Theme
+             FloatingActionButton Icon Icons ThemeData runApp AppBar State]]
+    ["package:flutter/widgets.dart" :as w
+     :refer [Text Center Expanded Column State StatefulWidget StatelessWidget]]
+    ["package:flutter/painting.dart" :as p]
+    ;; ["dart:isolate" :as di
+    ;;  :refer [Isolate SendPort ReceivePort]]
+    [tilton.mx.foundation :as mxf]
+    [tilton.mx.cell.base :as cty]
+    [tilton.mx.base :refer [wtrx dp dpx mx-throw]]
+    [tilton.mx.util :refer [atom?]]
+    [tilton.mx.model.peek :refer [chk Model mref? minfo]]
+    [tilton.mx.model.core :as md]
+    [tilton.mx.api :as mx
+     :refer [cF+ mset! cI rmap-set! rmap-meta-set! make mget mget? mkids mswap! cFkids wmx-iso]]
+    [tilton.fmx.factory :refer [deftag deftags deftags-plus my-ctx binding-ctx *ctx*] :as fxf]))
+
+(defonce ^:dynamic *fx-app* (atom nil))
+(defn *ctx []
+  fxf/*ctx*)
+
+(defn widget-key
+  ([me ctx] (widget-key me ctx :untag))
+  ([me ctx tag]
+   (dp :API-widg-key! (minfo me))
+   (fxf/widget-key me ctx tag)))
+
+(defn initialize [& options]
+  (cty/cells-reset)
+  (md/md-quiesce-feature! true)
+  (fxf/fx$sst-registry-initialize true)
+  (fxf/widget-key-clear)
+
+  ;; (fxk/fmx-debugger-set! sample-debugger)
+  )
+
+(defn ctx-page-push
+  ([ctx fx-page-def]
+   (ctx-page-push ctx fx-page-def nil))
+  ([ctx fx-page-def name]
+   (.push (-> ctx m/Navigator.of)
+     (#/(m/MaterialPageRoute Object)
+       .settings (m/RouteSettings .name name)
+       .builder (fn [my-ctx]
+                  (fx-render my-ctx
+                    (if (fn? fx-page-def)
+                      (fx-page-def my-ctx)
+                      fx-page-def)))))))
+
+(defn ctx-page-pop [ctx]
+  (.pop (-> ctx m/Navigator.of)))
+
+(defn fx-render [ctx fx]
+  (fxf/fx-render ctx fx))
+
+(defmacro within-ctx
+  "Create a CBResolve instance with a 'value' that is a function
+   with 'body' as its body and that will be called with 'me' and its context at build time."
+  [[me-var ctx-var] & body]
+  `(tilton.fmx.factory/->CBToResolve
+     (fn call-within-ctx [~me-var ~ctx-var]
+       (when-not (tilton.mx.api/mx-bound? ~ctx-var)
+         (throw (Exception. (str "within-ctx> context is unbound for body: " '~body))))
+       (when-not ~ctx-var
+         (throw (Exception. (str "within-ctx> context is null for body: " '~body))))
+       (when (not= ~ctx-var tilton.fmx.factory/*ctx*)
+         (tilton.mx.base/dp :winctx-sees-ctx-diff ~ctx-var :dynctx tilton.fmx.factory/*ctx*))
+       (tilton.fmx.factory/binding-ctx :within-ctx ~ctx-var
+         ~@body))))
+
+(defmacro when-my-state [[state-var] & body]
+  `(when-let [~state-var (tilton.fmx.api/my-state)]
+     ~@body))
+
+(defn ctx-nav [ctx]
+  (m/Navigator.of ctx))
+
+(defmacro my-controller [tag]
+  `(let [con# (:controller (deref ~'me))]
+     (assert con# (str "my-controller " ~tag
+                    " sees no controller in " (minfo ~'me)
+                    " keys " (keys (deref ~'me))))
+     ^m/AnimationController con#))
+
+(defmacro my-controller? [tag]
+  `(let [con# (:controller (deref ~'me))]
+     ^m/AnimationController? con#))
+
+(defn state-prop-get [me prop-key]
+  ;; todo why does this exist?
+  (assert (contains? (deref me) prop-key)
+    (str "my-state-prop> prop key " prop-key
+      " not contained by fx/state of " (tilton.mx.api/minfo me)))
+  (get (deref me) prop-key))
+
+(defmacro my-state-prop [prop-key]
+  `(do (assert (contains? ~'me ~prop-key) (str "my-state-prop> prop key " ~prop-key
+                                            " not contained by fx/state of " (tilton.mx.api/minfo ~'me)))
+     (get (deref ~'me) ~prop-key)))
+
+(defn text-field-controller-basic
+  ([me] (text-field-controller-basic me :value))
+  ([me prop]
+   (let [txt (mx/mget me prop)
+         c (m/TextEditingController.fromValue
+             (m/TextEditingValue
+               .text txt
+               .selection (m/TextSelection
+                            .baseOffset 0
+                            .extentOffset (count txt))))]
+     (.addListener c
+       (fn []
+         (wmx-iso
+           (mx/mset! me prop (.-text c)))))
+     c)))
+
+(defmacro my-animation []
+  ;; uncast since type will vary
+  `(tilton.mx.api/mget ~'me :animation))
+
+(defmacro my-state []
+  `(:fx$state (meta ~'me)))
+
+;;; ---- sundry factories  ------------------
+
+(deftag tilton.fmx.factory/kidless-childless checkbox-list-tile m/CheckboxListTile)
+(deftag tilton.fmx.factory/kidless-childless radio-list-tile m/RadioListTile)
+(deftag tilton.fmx.factory/konly-prop sized-box w/SizedBox [:child])
+
+#_(defmacro sized-box+expand [fx-props mx-props & children]
+    `(tilton.fmx.factory/k1-child-stateful m/SizedBox.expand ~fx-props ~mx-props ~@children))
+; ;;; --- next two not yet confirmed in practice
+;(defmacro positioned [fx-props mx-props & children]
+;  `(tilton.fmx.factory/k1-child-stateful m/Positioned ~fx-props ~mx-props ~@children))
+;(defmacro transorm+rotate-ful [fx-props mx-props & children]
+;  `(tilton.fmx.factory/k1-child-stateful m/Transform.rotate ~fx-props ~mx-props ~@children))
+
+(deftags-plus tilton.fmx.factory/konly-prop [:child]
+  ;;; --- next two not yet confirmed in practice
+  (positioned m/Positioned)
+  (transorm+rotate-ful m/Transform.rotate)
+  (sized-box+expand m/SizedBox.expand)                      ;; OK in x05-fab
+  (dropdown-menu-item m/DropdownMenuItem)
+  (theme m/Theme)
+  (icon-theme m/IconTheme)
+  (material m/Material)
+  (animated-builder m/AnimatedBuilder)
+  (fade-transition m/FadeTransition)
+  (listener w/Listener)
+  (mouse-region w/MouseRegion)
+  (ink-well m/InkWell)
+  (ignore-pointer w/IgnorePointer)
+  (absorb-pointer w/AbsorbPointer)
+  (container m/Container)
+  (card m/Card)
+  (padding m/Padding)
+  (place-holder w/PlaceHolder)
+  (single-child-scroll-view m/SingleChildScrollView)
+  (expanded m/Expanded)
+  (preferred-size m/PreferredSize)
+  (animated-opacity m/AnimatedOpacity)
+  (drawer-header m/DrawerHeader)
+  (align m/Align)
+  (selection-area m/SelectionArea)
+  (visibility m/Visibility)
+  (offstage m/Offstage)
+  (drawer m/Drawer)
+  (sized-box m/SizedBox)
+  (opacity m/Opacity)
+  (ink m/Ink)
+  (custom-paint m/CustomPaint)
+  #_(gesture-detector m/GestureDetector))
+
+(deftags tilton.fmx.factory/kidless-childless
+  (app-bar m/AppBar)
+  (data-table m/DataTable)
+  (image w/Image)
+  (list-tile m/ListTile)
+  (layout-builder w/LayoutBuilder)
+  (text-form-field m/TextFormField)
+  (flutter-logo m/FlutterLogo)
+  (navigation-rail-destination w/NavigationRailDestination))
+
+(deftags tilton.fmx.factory/non-widget
+  (text-style p/TextStyle)
+  (text-editing-controller w/TextEditingController)
+  (box-decoration m/BoxDecoration)
+  (bottom-navigation-bar-item w/BottomNavigationBarItem)
+  (rounded-rectangle-border p/RoundedRectangleBorder))
+
+(deftags tilton.fmx.factory/kidless-childless
+  (slider m/Slider)
+  (snack-bar m/SnackBar)
+  (dropdown-button m/DropdownButton)
+  (future-builder m/FutureBuilder)
+  (text-field m/TextField)
+  (check-box m/Checkbox)
+  (elevated-button+icon m/ElevatedButton.icon)
+  (filled-button+icon m/FilledButton.icon)
+  (outlined-button+icon m/OutlinedButton.icon)
+  (text-button+icon m/TextButton.icon)
+  (icon-button m/IconButton))
+
+(deftag tilton.fmx.factory/konly-param1 text m/Text)
+(deftag tilton.fmx.factory/konly-prop material-app m/MaterialApp :home)
+(deftag tilton.fmx.factory/konly-prop scaffold m/Scaffold :body)
+(deftag tilton.fmx.factory/konly-prop alert-dialog m/AlertDialog :content)
+
+(deftags-plus tilton.fmx.factory/konly-prop [:child]
+  (animated-container m/AnimatedContainer)
+  (center m/Center)
+  (hero m/Hero)
+  (floating-action-button m/FloatingActionButton)
+  (ink! m/Ink)
+  (popup-menu-button m/PopupMenuButton)
+  (popup-menu-item m/PopupMenuItem)
+  (opacity! m/Opacity)
+  (focus m/Focus)
+  (safe-area w/SafeArea)
+  (selection-area m/SelectionArea)
+  (ticker-mode w/TickerMode)
+  (dismissible w/Dismissible)
+  (default-tab-controller m/DefaultTabController)
+  (focus m/Focus)
+  (focus-scope m/FocusScope)
+  (text-button m/TextButton)
+  (focus+focus-node m/Focus.withExternalFocusNode)
+  )
+
+(deftags-plus tilton.fmx.factory/konly-prop [:child]
+  (elevated-button m/ElevatedButton)
+  (filled-button m/FilledButton)
+  (outlined-button m/OutlinedButton)
+  (text-button m/TextButton)
+  (intrinsic-width m/IntrinsicWidth)
+  (gesture-detector m/GestureDetector)
+  (form w/Form))
+
+(deftags-plus tilton.fmx.factory/kids-prop [:children]
+  (stack m/Stack)
+  (column m/Column)
+  (row m/Row)
+  (list-view m/ListView)
+  (grid-view+count m/GridView.count)
+  (tab-bar-view m/TabBarView)
+  (dropdown-menu )
+  (wrap w/Wrap))
+
+(deftag tilton.fmx.factory/kids-prop
+  navigation-rail m/NavigationRail :destinations)
+
+(deftag tilton.fmx.factory/kids-prop
+  bottom-navigation-bar m/BottomNavigationBar :items)
+
+(deftag tilton.fmx.factory/kids-prop
+  dropdown-button-form-field m/DropdownButtonFormField :items)
+
+(deftag tilton.fmx.factory/konly-param1 icon m/Icon)
+
+(deftag tilton.fmx.factory/kids-kids list-view+builder m/ListView.builder)
+(deftag tilton.fmx.factory/kids-kids list-view+separated m/ListView.separated) ;; untested
+
+;;; --- UNCONVERTED -------------------------------------
+
+(deftag tilton.fmx.factory/konly-layout-builder layout-kid-builder w/LayoutBuilder)
+
+(deftag tilton.fmx.factory/konly-builder builder w/Builder)
+(deftag tilton.fmx.factory/konly-builder-stateful stateful-builder w/StatefulBuilder)
+(deftag tilton.fmx.factory/konly-builder-stateful form-field w/FormField)
+
+(deftag tilton.fmx.factory/konly-builder-stateful tween-animation-builder w/TweenAnimationBuilder)
+
+;;; ---------------------------------------------------
+;;; the dance between Flutter and MX is a bit intricate
+;;; these macros try to hide the plumbing without being obscure.
+
+(defn ctxd? [tag me ctx]
+  (when (not= ctx (my-ctx))
+    (dp :CTXD?-FX-DIFF!!!! tag ctx *ctx*))
+  (when (not= ctx *ctx*)
+    (dp :CTXD?-**-DIFF!!!! tag ctx *ctx*)))
+
+(defmacro dart-cb [[& cb-params] & body]
+  `(tilton.fmx.api/within-ctx [~'me ~'ctx]
+     (fn [~@cb-params]
+       (tilton.mx.cell.base/wmx-iso
+         ;(tilton.mx.api/counts-dump :as-dart-cb)
+         ;(tilton.mx.api/counts-reset)
+         ~@body))))
+
+(defmacro my-app []
+  ;; fasc "captures" 'me
+  `(tilton.mx.api/fasc :app))
+
+;;; --- hot reload support --------------------
+
+(defmacro wrap-stateless [widget-expression]
+  `(reify :extends (w/StatelessWidget)
+     (~'build [self# ctx#]
+       (tilton.fmx.factory/binding-ctx :wrapstless ctx#
+         ~widget-expression))))
+
+(defmacro wrap-unique-key [widget-expression]
+  `(reify :extends (w/StatefulWidget .key (foundation/UniqueKey))
+     (~'createState [_#]
+       (reify :extends w/State
+         (~'build [_# ~'ctx]
+           (tilton.fmx.factory/binding-ctx :wuq-key ~'ctx
+             ~widget-expression))
+         (^void ~'reassemble [this#]
+           (.reassemble ^{:tag ~'super} this#)
+           (tilton.fmx.api/repl-ish))))))
+
+(defn repl-ish []
+  (dp :REPL-ish-reload!!!!!!!!!!!))
+
+(defn user-alert [ctx content]
+  (m/showDialog
+    .context ctx
+    .builder (fn [ctx]
+               (m/AlertDialog
+                 .content (if (string? content)
+                            (m/Text content)
+                            content)))))
+
+(defmacro hot-reload-detector
+  [& body]
+  (let [flutter-build-ctx (vary-meta `ctx# assoc :tag `w/BuildContext)
+        state-sym `^w/State state#
+        super-sym `super#]
+    `(reify :extends (w/StatefulWidget.)
+       :no-meta true
+       (~'createState [_#]
+         (reify :extends w/State
+           :no-meta true
+           (~'initState [~state-sym]
+             (.initState ~(vary-meta state-sym assoc :tag 'super))
+             nil)
+           (^void ~'reassemble [this#]
+             (.reassemble ^{:tag ~'super} this#)
+             (repl-ish))
+           (~'dispose [~state-sym]
+             (.dispose ~(vary-meta state-sym assoc :tag 'super)))
+           (~'build [~state-sym ~flutter-build-ctx]
+             (tilton.fmx.factory/binding-ctx :hotrelo ~flutter-build-ctx
+               ~@body)))))))
+
+(defmacro hot-reload-detector-ctx
+  [& body]
+  (let [flutter-build-ctx (vary-meta `ctx# assoc :tag `w/BuildContext)
+        state-sym `^w/State state#
+        super-sym `super#]
+    `(reify :extends (w/StatefulWidget.)
+       :no-meta true
+       (~'createState [_#]
+         (reify :extends w/State
+           :no-meta true
+           (~'initState [~state-sym]
+             (.initState ~(vary-meta state-sym assoc :tag 'super))
+             nil)
+           (^void ~'reassemble [this#]
+             (.reassemble ^{:tag ~'super} this#)
+             (tilton.fmx.api/repl-ish))
+           (~'dispose [~state-sym]
+             (.dispose ~(vary-meta state-sym assoc :tag 'super)))
+           (~'build [~state-sym ~flutter-build-ctx]
+             (tilton.fmx.factory/binding-ctx :hotrelo ~flutter-build-ctx
+               (let [~'ctx ~flutter-build-ctx]
+                 ~@body))))))))
+
+#_#_#_ ^:mixin m/WidgetsBindingObserver
+(didChangeAppLifecycleState [this st]
+  (cb st)
+  nil)
+
+(defonce *fx-app* (atom nil))
+
+(defmacro run-app [widget-expression]
+  `(m/runApp
+     (tilton.fmx.api/wrap-stateless
+       (tilton.fmx.api/wrap-unique-key
+         ~widget-expression))))
+
+(defmacro run-fx-app [fx-app]
+  `(m/runApp
+     (tilton.fmx.api/wrap-stateless
+       (tilton.fmx.api/wrap-unique-key
+         (tilton.fmx.api/fx-render ~'ctx ~fx-app)))))
+
+(defmacro run-fx-app-warm [fx-app]
+  `(m/runApp
+     (tilton.fmx.api/hot-reload-detector
+       (tilton.fmx.api/fx-render nil ~fx-app))))
+
+(defmacro run-fx-app-hot [fx-app]
+  `(m/runApp
+     (tilton.fmx.api/hot-reload-detector-ctx
+       (tilton.fmx.api/fx-render ~'ctx
+         (reset! *fx-app*
+           ~fx-app)))))
+
+#_
+(defn listen-lifecycle-state [^#/(m/AppLifecycleState? -> void) cb ^m/Widget .child]
+  (reify :extends m/StatefulWidget
+    :no-meta true
+    (createState [this]
+      (reify :extends m/State
+        :no-meta true
+        (initState [this]
+          (.initState ^super this)
+          (m/WidgetsBinding.instance.addObserver this)
+          (when-some [ls m/WidgetsBinding.instance.lifecycleState]
+            (cb ls))
+          nil)
+        (dispose [this]
+          (m/WidgetsBinding.instance.removeObserver this)
+          (.dispose ^super this))
+        (build [_ _] child)
+        ^:mixin m/WidgetsBindingObserver
+        (didChangeAppLifecycleState [this st]
+          (cb st)
+          nil)))))
+
+;;; --- environment ------------------------
+
+(defn is-web? []
+  foundation/kIsWeb)
+
+(defn is-mobile? []
+  (and (not (is-web?))
+    ;; we cannot ask about Platform if on Web, so first ^^ we rule that out
+    (or io/Platform.isAndroid
+      io/Platform.isIOS)))
+
+(defn is-desktop? []
+  (and (not (is-web?))
+    ;; we cannot ask about Platform if on Web, so first ^^ we rule that out
+    (or io/Platform.isMacOS
+      io/Platform.isWindows
+      io/Platform.isLinux)))
+
+(defn platform-category []
+  (cond
+    (is-web?) :web
+    (is-desktop?) :desktop
+    (is-mobile?) :mobile
+    io/Platform.isFuchsia :fuchsia
+    :else :unknown))
+
+;;; --- isolates ---------------------------------------------
+
+;; (defn make-isolate
+;;   ([worker-fn]
+;;    (make-isolate worker-fn
+;;      (fn [result]
+;;        (dpx :ignoring result))))
+;;   ([worker-fn result-handler]
+;;    (mx/make                                                 ;; ::mx-isolate
+;;      :name :mx-iso
+;;      :result-port (ReceivePort)
+;;      :worker-iso (cF+ [:async? true
+;;                        :watch (fn [_ me worker _ _]
+;;                                 (when worker
+;;                                   (dpx :got-worker-isolate! worker)))]
+;;                    (Isolate.spawn
+;;                      (fn [msg]
+;;                        (let [{:keys [msg-type ^SendPort result-port msg-worker]} msg
+;;                              task-port (ReceivePort)]
+;;                          (dpx :msg-worker msg-worker)
+;;                          (.send result-port {:msg-type  :config
+;;                                              :task-port (.-sendPort task-port)})
+;;                          (.listen task-port
+;;                            (fn [task]
+;;                              (dpx :listener-task task)
+;;                              (let [result (msg-worker task)]
+;;                                (.send result-port {:msg-type :result
+;;                                                    :value    result}))))
+;;                          nil))
+;;                      {:msg-type    :config
+;;                       :msg-worker  worker-fn
+;;                       :result-port (.-sendPort ^ReceivePort (mget me :result-port))}
+;;                      .errorsAreFatal true
+;;                      .debugName "make-iso-isolate"))
+;;      :result-listener (cF+ []
+;;                         (when (mget me :worker-iso)
+;;                           (.listen ^ReceivePort (mget me :result-port)
+;;                             (fn [res]
+;;                               (case (:msg-type res)
+;;                                 :config (wmx-iso
+;;                                           (mset! me :task-out-port (:task-port res)))
+;;                                 (do (wmx-iso (mset! me :value (:value res)))
+;;                                   (result-handler res)))))))
+;;      ;; todo allow initting of cI to unbound
+;;      :value (cI nil #_mx/unbound
+;;               :ephemeral? true
+;;               #_#_ :watch (fn [_ _ new _ _]
+;;                        (dp :mx-iso-value!! new)))
+;;      :task-out-port (cI nil))))

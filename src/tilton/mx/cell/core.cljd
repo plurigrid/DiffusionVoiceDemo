@@ -1,0 +1,353 @@
+(ns tilton.mx.cell.core
+  (:require
+    [tilton.mx.model.peek :refer [chk mref? minfo]]
+    [tilton.mx.util :refer [rmap-set!]]
+    [tilton.mx.base
+     :refer [mx-throw trx wtrx dprn dp dpx prog1 *trx?* def-rmap-props def-rmap-meta-props]]
+    [tilton.mx.cell.base
+     :refer [without-c-dependency *within-integrity*
+             c-optimized-away? c-formula? c-value c-optimize
+             c-unbound? c-input? unbound dpc dpm
+             c-model c-valid? c-useds c-prop-name c-code$ c-code
+             c-state +pulse+ c-pulse-observed
+             *call-stack* *defer-changes*
+             c-rule c-me c-value-state c-callers
+             c-synapses c-async?
+             unlink-from-callers *causation*
+             c-synaptic?
+             c-pulse c-pulse-last-changed c-ephemeral? c-prop
+             c-lazy] :as cty]
+
+    [tilton.mx.cell.observer
+     :refer [fn-obs]]
+
+    [tilton.mx.cell.integrity
+     :refer [with-integrity]]
+    [tilton.mx.cell.evaluate :as ev
+     :refer [cget cget c-value-assume
+             record-dependency ensure-value-is-current]]
+    [tilton.mx.model.peek :refer [mref? cref? cinfo Cell CellFormula]]))
+
+; todo: stand-alone cells with observers should be observed when they are made
+
+(def +valid-input-options+ #{:obs :watch :prop :ephemeral? :unchanged-if
+                             :value :input? :dbg :on-quiesce :sst})
+(def +valid-formula-options+ #{:obs :watch :prop :input? :lazy :optimize :ephemeral? :unchanged-if
+                               :code :value :rule :async? :async-then :for-each :dbg :on-quiesce :sst})
+
+(defn c-options-canonicalize [options allowed]
+  ;;(dp :coc-entry options)
+  (when (some #{:zoom} options)
+    (dp :make-cell-sees-zoom options))
+  (loop [[k v & more] options
+         res nil
+         observer? false]
+    ;;(dp :coc-pair k v (count more))
+    (cond
+      (nil? k) (reverse res)
+      :else (do
+              (chk (some #{k} allowed) (str "Cell option invalid: " k ". Only allowed are: " allowed))
+              (when (= k :zoom)
+                (dp :zoom!!! k allowed (some #{k} allowed)))
+              (when (and observer? (some #{k} [:obs :watch]))
+                (mx-throw "c-options-canonicalize> options include multiple :watch or :obs. Supply just one."))
+
+              (recur more (conj res (case k
+                                      :watch :obs
+                                      k) v) (or observer? (some #{k} [:obs :watch])))))))
+
+(defn make-cell [& kvs]
+  (let [options (apply hash-map (c-options-canonicalize kvs
+                                  +valid-input-options+))]
+    (atom (merge {:mx-type            (Cell.)
+                  :value              unbound
+                  :state              :nascent
+                  :pulse              0
+                  :pulse-last-changed 0
+                  :pulse-observed     0
+                  :callers            #{}
+                  :synapses           #{}                   ;; these stay around between evaluations
+                  ;; todo: if a rule branches away from a synapse it needs to be GCed so it starts fresh
+                  :lazy               false                 ;; not a predicate (can hold, inter alia, :until-asked)
+                  :ephemeral?         false
+                  :input?             true}
+            options))))
+
+(defn make-c-formula [& kvs]
+  (let [options (apply hash-map (c-options-canonicalize kvs
+                                  +valid-formula-options+))
+        rule (:rule options)]
+    (chk rule)
+    (chk (fn? rule))
+
+    (when-let [lazy (:lazy options)]
+      (chk (some #{lazy} [true false :until-asked]) (str "make-cf sees invalid value for :lazy " lazy)))
+
+    (atom (merge {:mx-type            (CellFormula.)
+                  :value              unbound
+                  ;; todo move internals into third map so they cannot be overridden
+                  :state              :nascent              ;; s/b :unbound?
+                  :pulse              0
+                  :pulse-last-changed 0
+                  :pulse-observed     0
+                  :callers            #{}
+                  :useds              #{}
+                  :lazy               false
+                  :ephemeral?         false
+                  :optimize           true                  ;; this can also be :when-not-nil
+                  :input?             false                ;; not redundant: can start with rule, continue as input
+                  }
+            options))))
+
+;;___________________ constructors _______________________________
+;; I seem to have created a zillion of these, but I normally
+;; use just cI, cF, and cFn (which starts out as cF and becomes cI).
+;;
+
+(defmacro c-fn-var [[c] & body]
+  `(fn [~c]
+     (let [~'me (tilton.mx.cell.base/c-model ~c)
+           ~'_cell ~c
+           ~'_slot-name (tilton.mx.cell.base/c-prop ~c)
+           ~'_cache (tilton.mx.cell.base/c-value ~c)]
+       ~@body)))
+
+(defmacro c-fn [& body]
+  `(c-fn-var (~'prop-c#) ~@body))
+
+(defmacro cF [& body]
+  `(make-c-formula
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)))
+
+(defmacro cFnil [& body]
+  ;; todo why does this exist?
+  `(make-c-formula
+     ;;:code '~body
+     :value nil
+     :rule (tilton.mx.cell.core/c-fn ~@body)))
+
+(defmacro cF+ [[& options] & body]
+  `(make-c-formula
+     ~@options
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)))
+
+(defmacro cFn [& body]
+  `(make-c-formula
+     :code '(without-c-dependency ~@body)
+     :input? true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (without-c-dependency ~@body))))
+
+(defmacro cFn>
+  "Continues as reactive formula /and/ input Cell"
+  ;; See TTS example for use case: modify freely after
+  ;; initial calc, but then re-calc/init when input changes
+  [& body]
+  `(make-c-formula
+     :code '(do ~@body)
+     :input? true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)))
+
+(defmacro cF+n> [[& options] & body]
+  `(make-c-formula
+     ~@options
+     :code '(do ~@body)
+     :input? true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)))
+
+(defmacro cF+n [[& options] & body]
+  `(make-c-formula
+     ~@options
+     :code '(without-c-dependency ~@body)
+     :input? true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (without-c-dependency ~@body))))
+
+(defmacro c_Fn [& body]
+  `(make-c-formula
+     :code '(without-c-dependency ~@body)
+     :input? true
+     :lazy :until-asked
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (without-c-dependency ~@body))))
+
+(defmacro cFn-dbg [& body]
+  `(make-c-formula
+     :code '(without-c-dependency ~@body)
+     :input? true
+     :dbg true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (without-c-dependency ~@body))))
+
+#_
+(defmacro cFn-until [args & body]
+  `(make-c-formula
+     :optimize :when-value-t
+     :code '~body
+     :input? true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)
+     ~@args))
+
+(defmacro cFonce [& body]
+  `(make-c-formula
+     :code '(without-c-dependency ~@body)
+     :input? nil
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (tilton.mx.cell.base/without-c-dependency ~@body))))
+
+(defmacro c_1 [& body]
+  `(make-c-formula
+     :code '(without-c-dependency ~@body)
+     :input? nil
+     :lazy true
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn (without-c-dependency ~@body))))
+
+(defmacro cF1 [& body]
+  `(cFonce ~@body))
+
+(defmacro cFdbg [& body]
+  `(make-c-formula
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :dbg true
+     :rule (c-fn ~@body)))
+
+(defmacro cF_ [[& options] & body]
+  `(make-c-formula
+     ~@options
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :lazy true
+     :rule (c-fn ~@body)))
+
+(defmacro c_F [[& options] & body]
+  "Lazy until asked, then eagerly propagating"
+  `(make-c-formula
+     ~@options
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :lazy :until-asked
+     :rule (c-fn ~@body)))
+
+(defmacro c_Fdbg [& body]
+  "Lazy until asked, then eagerly propagating"
+  `(make-c-formula
+     :code '~body
+     :value tilton.mx.cell.base/unbound
+     :lazy :until-asked
+     :rule (c-fn ~@body)
+     :dbg true))
+
+(defmacro c-formula [[& kvs] & body]
+  `(make-c-formula
+     :code '~body                                           ;; debug aid
+     :value tilton.mx.cell.base/unbound
+     :rule (c-fn ~@body)
+     ~@keys))
+
+(defmacro cf-freeze! [& [value]]
+  (let [value-ref (or value '_cache)]
+    `(do
+       (rmap-set! [:optimize ~'_cell] :freeze)
+       ~value-ref)))
+
+(defn cI [value & option-kvs]
+  (apply make-cell
+    :value value
+    :input? true
+    option-kvs))
+
+;; --- where change and animation begin -------
+
+(defn cset! [c new-value]
+  "The moral equivalent of a Common Lisp SETF, and indeed
+in the CL version of Cells SETF itself is the change API dunction."
+  (chk (cref? c))
+  (dpm c :cset :cset!-entry-new-value new-value
+    :winteg? cty/*within-integrity*  :defer? *defer-changes* :fut? (c-async? c))
+  (chk (not (c-async? c)) "attempt to cset! cfuture " (cinfo c))
+
+  (dpx :cset-checks-ok)
+  (when-not (c-input? c)
+    (dp :formula!!!!!! (c-code c))
+    (dp :formula!!!!!!!? (c-code$ c))
+    (mx-throw
+      "MXAPI_ILLEGAL_MUTATE_NON_INPUT_CELL> invalid mswap!/mset!/mset! to the property '" (c-prop-name c) "',\n"
+      "...> FYI: cell is " (if (c-formula? c) "" "NOT ") "a formula cell,\n"
+      (when (c-formula? c)
+        (str "...> FYI: the formula is: " (c-code$ c) "\n"))
+      "...> FYI: intended new value is [" new-value "]; current value is [" (:value @c) "].\n"
+      "...> FYI: instance is " (minfo (c-model c)) "\n."))
+  (dpx :cset-checks-ok-2)
+  (cond
+    *defer-changes*
+    #_(let [prop (c-prop-name c)
+            me (c-model c)]
+        (mx-throw
+          "MXAPI_UNDEFERRED_CHANGE> undeferred mswap!/mset! to the property '" prop "' by an observer detected."
+          "...> such mutations must be wrapped by WITH-INTEGRITY, must conveniently with macro WITH-CC."
+          "...> look for MXAPI_UNDEFERRED_CHANGE in the Errors documentation for  more details.\n"
+          "...> FYI: intended new value is [" new-value "]; current value is [" (get @me prop :no-such-prop) "].\n"
+          "...> FYI: instance is of type " (type-cljc me) ".\n"
+          "...> FYI: full instance is " @me "\n"
+          "...> FYI: instance meta is " (meta me) "\n.")
+        #_(mx-throw (cl-format true "MXAPI_UNDEFERRED_CHANGE> change to ~s must be deferred by wrapping it in WITH-INTEGRITY"
+                      (c-prop c))))
+    (do (dp :c-reset-rejecting-undeferred! (c-prop c))
+        (mx-throw (str "cset!> change  must be deferred by wrapping it in WITH-INTEGRITY. prop: "
+                    (c-prop c) " :me " (minfo (c-model c)))))
+    ;-----------------------------------
+    (some #{(c-lazy c)} [:once-asked :always true])
+    (c-value-assume c new-value nil)
+    ;-------------------------------------------
+    :else
+    (do (dpm c :cset+ :cset-pre-w-integrity-new-value new-value)
+        (dpx :csetgo)
+        (with-integrity (:change (c-prop c))
+          (dpx :cset-wi)
+          (dpm c :cset :cset!-pre-cvass-new-value new-value)
+          (c-value-assume c new-value nil)))))
+
+(defn cswap! [c swap-fn & swap-fn-args]
+  (cset! c (apply swap-fn (cget c) swap-fn-args)))
+
+(defmacro c-reset-next! [f-c f-new-value]
+  "Observers should have side-effects only outside the
+cell-mediated model, but it can be useful to have an observer
+kick off further change to the model. To achieve this we
+allow an observer to explicitly queue a cset! for
+execution as soon as the current change is manifested."
+  `(cond
+     (not *within-integrity*)
+     (mx-throw (str "c-reset-next!> deferred change to %s not under WITH-INTEGRITY supervision."
+                 (c-prop ~f-c)))
+     ;---------------------------------------------
+     :else
+     (tilton.mx.cell.integrity/ufb-add :change
+       [:c-reset-next!
+        (fn [~'opcode ~'defer-info]
+          (let [c# ~f-c
+                new-value# ~f-new-value]
+            (call-c-reset-next! c# new-value#)))])))
+
+(defmacro cset-next!>
+  "Completely untested!!!!!!!!!!!!!!!"
+  [f-c f-new-value]
+  `(c-reset-next! ~f-c ~f-new-value))
+
+(defn call-c-reset-next! [c new-value]
+  (cond
+    ;;-----------------------------------
+    (some #{(c-lazy c)} [:once-asked :always true])
+    (c-value-assume c new-value nil)
+    ;;-------------------------------------------
+    :else
+    (c-value-assume c new-value nil)))

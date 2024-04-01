@@ -1,0 +1,393 @@
+(ns tilton.mx.model.core
+  (:require
+    [clojure.string :as str]
+    [tilton.mx.model.peek :refer [*mx* mx-md mx-prop]]
+    [tilton.mx.model.base :refer [md-cz]]
+    [tilton.mx.base
+     :refer [trx wtrx dprn dp dpx prog1 dprn dp dpx *trx?* *trdeep* def-rmap-props mx-throw]]
+    [tilton.mx.foundation :refer [mx-type PObserver observe]]
+    [tilton.mx.util
+     :refer [difference atom? rmap-set! rmap-meta-set! pln]]
+
+    [tilton.mx.cell.base
+     :refer [without-c-dependency dpc
+             cells-init c-optimized-away? c-formula? c-value c-optimize
+             c-unbound? c-input? c-quiesce!
+             c-model c-valid? c-useds
+             c-state +pulse+ c-pulse-observed
+             *call-stack* *defer-changes* unbound
+             c-rule c-me c-value-state c-callers
+             unlink-from-callers *causation*
+             c-synaptic? c-prop-name
+             c-pulse c-pulse-last-changed c-ephemeral? c-prop c-props
+             *depender* c-lazy] :as cty]
+    [tilton.mx.cell.integrity :refer [with-integrity]]
+    [tilton.mx.cell.observer :refer [fx-observe observer-register fn-obs]]
+
+    [tilton.mx.cell.core
+     :refer [cF cF+ c-reset-next! cFonce cFn cI cset! make-cell]]
+    [tilton.mx.cell.evaluate :refer [cget c-awaken]]
+    [tilton.mx.model.peek :refer [chk *md-quiescing* Model minfo cinfo mref? cref?]]
+    [tilton.mx.model.base :refer [mget mget? md-cell md-install-cell md-awaken]]
+    [tilton.mx.model.navigate :refer [navig]]))
+
+(declare md-quiesce!)
+
+(defmacro pme [& mas]
+  `(when true                                               ;;  (= :login (:name (deref ~'me)))
+     (dp (mx-type ~'me)
+       (:tag (deref ~'me))
+       (:name (deref ~'me)) ~@mas)))
+
+(def +matrix+
+  "Each app can optionally populate this with the root of its application matrix, as a convenience."
+  (atom nil))
+
+;;; --- accessors ----
+
+(defn mset! [me prop new-value]
+  (chk me "no me passed to mset!")
+  (chk (mref? me) (str "mset me not mref but: " (minfo me) "," prop))
+  (if-let [c (md-cell me prop)]
+    (do
+      (cset! c new-value))
+    (if (contains? (md-cz me) prop)
+      ;; it was a formula optimized away
+      (mx-throw
+        "MXAPI_ILLEGAL_MUTATE_FORMULA_CELL> invalid mswap!/mset!/mset! to the property '" prop "',\n"
+        " which was mediated by a formula cell but optimized away.\n"
+        "...> FYI: intended new value is [" new-value "]; initial value was [" (get @me prop :no-such-prop) "].\n"
+        "...> FYI: instance is of type " (mx-type me) ".\n"
+        "...> FYI: instance info is " (minfo me) "\n"
+        ;; "...> FYI: instance meta is " (meta me) "\n."
+        )
+
+      (do
+        (dp :mset-5)
+        (if (contains? @me prop)
+          (mx-throw
+            "MXAPI_ILLEGAL_MUTATE_NONCELL> invalid mswap!/mset!/mset! to the property '" prop "', which is not mediated by any cell.\n"
+            "...> if such post-make mutation is in fact required, wrap the "
+            "initial argument to model.core/make in 'cI'. eg: (make... :answer (cI 42)).\n"
+            "...> look for MXAPI_ILLEGAL_MUTATE_NONCELL in the Errors documentation for  more details.\n"
+            "...> FYI: intended new value is [" new-value "]; initial value was [" (get @me prop :no-such-prop) "].\n"
+            "...> FYI: instance is of type " (mx-type me) ".\n"
+            "...> FYI: instance info is " (minfo me) "\n"
+            ;;"...> FYI: instance meta is " (meta me) "\n."
+            )
+          (mx-throw
+            "MXAPI_ILLEGAL_MUTATE_NO_SUCH_SLOT> mset! was attempted on non-existent prop \"" prop "\".\n"
+            "...> FYI: known non-internal slots are" (keys (dissoc @me :mx :fx-class :fx-gen))))))))
+
+(defn mswap! [me prop swap-fn & swap-fn-args]
+  (chk me (str "mswap! passed nil for me accessing prop: " prop))
+  (chk (mref? me) (str "mswap! passed non-model for me accessing prop: " prop ": " (minfo me)))
+  (if (contains? @me prop)
+    (mset! me prop (apply swap-fn (without-c-dependency (mget me prop)) swap-fn-args))
+    (mx-throw
+      "MXAPI_ILLEGAL_MUTATE_NO_SUCH_SLOT> mswap! was attempted on non-extant prop \"" prop "\".\n"
+      "...> FYI: known non-internal slots are" (keys (dissoc @me :mx :fx-class :fx-gen)))))
+
+(defn mupdate! [me prop swap-fn & swap-fn-args]
+  (chk me (str "mupdate! passed nil as `me` accessing prop: " prop))
+  (chk (mref? me) (str "mupdate! passed non-model for me accessing prop: " prop ": " (minfo me)))
+  (if (contains? @me prop)
+    (mset! me prop (apply swap-fn (without-c-dependency (mget me prop)) swap-fn-args))
+    (mx-throw
+      "MXAPI_ILLEGAL_MUTATE_NO_SUCH_SLOT> mupdate! was attempted on non-extant prop \"" prop "\".\n"
+      "...> FYI: known non-internal slots are" (keys (dissoc @me :mx :fx-class :fx-gen)))))
+
+(def +md-sid+ (atom 0))
+(defn md-sid [me]
+  (:sid (meta me)))
+
+(defn make [& arg-list]
+  (cond
+    (odd? (count arg-list)) (cond
+                              (dart/is? (first arg-list) Model)
+                              (apply make :mx-type arg-list)
+                              :default (throw (Exception. (str "Implied MX-TYPE " (first arg-list)
+                                                            " not a sub-type of Model"))))
+    :else
+    (do
+      (let [iargs (apply hash-map arg-list)
+            md-map (merge {:mx *mx*}
+                     (->> arg-list
+                       (partition 2)
+                       (filter (fn [[prop v]]
+                                 (not (some #{prop} [:fx$quiesce :mx-type
+                                                     :fx$ikeys :fx$dpk]))))
+                       (map (fn [[k v]]
+                              (vector k (if (cref? v)
+                                          unbound
+                                          v))))
+                       (into {})))
+            me (atom md-map
+                 :meta (merge
+                         {:state      :nascent
+                          :mx-type    (:mx-type iargs (Model.))
+                          :fx$ikeys   (do (dpx :ikeys!!!!!!!!!! (:fx$ikeys iargs))
+                                          (:fx$ikeys iargs))
+                          :fx$quiesce (:fx$quiesce iargs)
+                          :sid        (swap! +md-sid+ inc)}
+                         (when (contains? iargs :fx$dpk)
+                           {:fx$dpk (:fx$dpk iargs)})))]
+        (dpx :make-post-me-iargs!!!!! (keys iargs))
+        (rmap-meta-set!
+          [:cz me]
+          (->> arg-list
+            (partition 2)
+            (filter (fn [[prop v]]
+                      (when-not (some #{prop} [:parent :name :mx-type :on-quiesce
+                                               :fx$ikeys :fx$notifier :fx$observer])
+                        (md-install-cell me prop v))))
+            (map vec)
+            (into {})))
+
+        ;(prn :meta-cz? (meta me))
+
+        (with-integrity (:awaken me)
+          (md-awaken me)
+          #_(dp :md-awaken-complete))
+        me))))
+
+(defn md-reactive? "Are any properties bound to input or formulaic values?"
+  ;; todo should this be memoized?
+  [me]
+  (dpx :MDR? (:style (md-cz me)) (:cells-flushed (meta me)) (minfo me))
+  (some (fn [[ky c]]
+          (dpx :MDR?-sees-key ky :c? (not (nil? c)) :me (minfo me))
+          (or
+            (when c
+              (dpx :MDR?-sees ky (cinfo c) :me (minfo me))
+              (when (or (c-input? c)
+                      (c-formula? c))
+                ;; (dp :bingo-reactive (:state @c) (cinfo c))
+                c))
+            (when-let [d (mget me ky)]
+              (when (and (mref? d)
+                      (md-reactive? d))
+                (dpx :reactivee-delegate!! (minfo d) :of (minfo me))
+                true))))
+    (md-cz me)))
+
+;;; --- family ------------------------------------
+
+(defn mkids [me] (mget me :kids))
+(defn mkids? [me] (mget? me :kids))
+
+(defn fm-quiesce [me]
+  (wtrx [0 999 :fmq (minfo me)]
+    (doseq [k (mkids? me)]
+      (when (mref? k)
+        ;; ^^^ mxWeb allows string children
+        (prn :fm-quiesce-kid (minfo k))
+        (md-quiesce! k)))))
+
+(defn fm-kids-observe [prop-name me newk oldk c]
+  (wtrx [0 999 :fmkids-obs prop-name (minfo me)]
+    (when-not (= oldk unbound)
+      (let [lostks (difference (set oldk) (set newk))]
+        (when-not (empty? lostks)
+          (doseq [k lostks]
+            (dp :quiescing)
+            (md-quiesce! k)))))))
+
+;; todo are we using Family?
+(deftype Family []
+  :extends Model
+  PObserver
+  (observe [this prop me new-value prior-value cell]
+    ;; todo call super observe
+    (when (= prop :kids)
+      (dp :obsign-kids)
+      (fm-kids-observe prop me new-value prior-value cell)
+      (dp :obsign-kids-done))))
+
+(defmacro mmx [& [me]]
+  (let [me (or me 'me)]
+    `(:mx @~me)))
+
+(defmacro mmx-md [& [me]]
+  (let [me (or me 'me)]
+    `(first (:mx @~me))))
+
+(defn make-family [& arg-list]
+  (dp :make-fanily!!!)
+  (cond
+    ;; if arg-list is odd we assume they started with a Family subtype
+    ;; used mostly for regression tests
+    (odd? (count arg-list)) (apply make-family :mx-type arg-list)
+    :else
+    (apply make
+      :mx-type (Family.)
+      :on-quiesce fm-quiesce
+      arg-list)))
+
+;;; -------------------------------------------------------------------------
+;;;      Navigation
+;;;
+
+(defn next-sibling [mx]
+  (without-c-dependency
+    (loop [sibs (mkids (mmx-md mx))]
+      (when sibs
+        (if (= mx (first sibs))
+          (second sibs)
+          (recur (rest sibs)))))))
+
+(defn prev-sibling [mx]
+  (without-c-dependency
+    (loop [sibs (mkids (mmx-md mx))]
+      (when sibs
+        (cond
+          (= mx (first sibs)) nil
+          (= mx (second sibs)) (first sibs)
+          :default
+          (recur (rest sibs)))))))
+
+(defn fm! [what where]
+  (navig what where :me? false :inside? true :must? true :out true))
+
+(defmacro mdv! [what prop & [me]]
+  (let [me (or me 'me)]
+    `(mget (tilton.mx.model.core/fm! ~what ~me) ~prop)))
+
+(defmacro fmu [name & [me]]
+  (let [me-ref (or me 'me)]
+    `(tilton.mx.model.navigate/navig ~name ~me-ref
+       :me? false :out true :inside? false)))
+
+(defmacro fmu-inc [name & [me]]
+  ;; fmu "inclusive" of the starting node "me"
+  (let [me-ref (or me 'me)]
+    `(tilton.mx.model.navigate/navig ~name ~me-ref
+       :me? true :out true :inside? false)))
+
+(defmacro fasc "Search strictly up exclusive of start"
+  [name & [me]]
+  `(let [name# ~name
+         me# ~(or me 'me)]
+     (tilton.mx.model.navigate/navig name# me# :me? false :out :asc-only)))
+
+(defmacro fm* [name & [me]]
+  (let [me-ref (or me 'me)]
+    `(let [name# ~name]
+       (tilton.mx.model.navigate/navig name# ~me-ref
+         :me? true :out true :inside? true))))
+
+(defmacro fm*v [name & [prop me]]
+  (let [prop (or prop ':value)
+        me-ref (or me 'me)]
+    `(let [other# (tilton.mx.model.navigate/navig ~name ~me-ref
+                    :me? true :out true :inside? true)]
+       (chk other# (str "fm*v did not find other named " ~name " seeking property " ~prop))
+       (tilton.mx.model.base/mget other# ~prop))))
+
+(defmacro muv [name & [prop me]]
+  (let [prop (or prop ':value)
+        me-ref (or me 'me)]
+    `(let [other# (tilton.mx.model.navigate/navig ~name ~me-ref
+                    :me? false :out true :inside? false)]
+       (chk other# (str "muv> did not find other named " ~name " seeking property " ~prop))
+       (mget other# ~prop))))
+
+;;; --- ancestry ----
+(defn fm-ancestry [me]
+  (chk (mref? me))
+  (when-let [a (mmx-md me)]
+    (conj (fm-ancestry a) a)))
+
+(defmacro the-kids [& tree]
+  `(binding [tilton.mx.model.peek/*mx* [~'me :kids]]
+     (doall (remove nil? (flatten (list ~@tree))))))
+
+(defmacro cFkids [& tree]
+  `(cF (the-kids ~@tree)))
+
+(defn kid-values-kids [me x-kids]
+  (let [k-key (mget me :kid-key)
+        x-kids (when (not= x-kids unbound)
+                 (into {} (for [k x-kids]
+                            [(k-key k) k])))
+        k-factory (mget me :kid-factory)]
+    (doall
+      (map-indexed
+        (fn [idx kid-value]
+          (or (and x-kids (get x-kids kid-value))
+            (binding [*mx* [~'me :kids]]
+              (k-factory me kid-value))))
+        (mget me :kid-values)))))
+
+;;; --- quiesce -------------------------------------------------
+
+
+;; --- md-quiesce --
+
+(defn md-owning?
+  "Is [MD prop] the :mx edge of OTHER?"
+  [md prop other]
+  (and (mref? md) (mref? other)
+    (when-let [[mx-md mx-prop] (:mx @other)]
+      (and (= mx-md md)
+        (= mx-prop prop)))))
+
+(defn md-quiesce-if-owned!
+  ([cell val]
+   (md-quiesce-if-owned! (c-model cell) (c-prop-name cell) val))
+  ([me prop val]
+   (if (and (coll? val) (mref? (first val)))
+     (doseq [md val]
+       (md-quiesce-if-owned! me prop md))
+     (when (md-owning? me prop val)
+       ;;(dp :mdqing-owned-property prop (minfo val) :owned-by (minfo me))
+       (md-quiesce! val)))))
+
+(defn md-quiesce-self! [me]
+  (wtrx [0 999 nil :mdq-self (minfo me)]
+    (when-let [onq (get @me :on-quiesce)]
+      (wtrx [0 999 nil :mdq-onq (minfo me)]
+        (onq me)))
+
+    (doseq [c (vals (:cz (meta me)))]
+      (when c                                               ;; not if optimized away
+        (dpc c :quiesce :mdq-self-qis c)
+        (c-quiesce! c)))
+
+    (doseq [k (keys @me)]
+      (when-not (some #{k} [:mx])
+        (when-let [v (get @me k)]
+          (md-quiesce-if-owned! me k (get @me k)))))
+
+    (rmap-meta-set! [:state me] :md-quiesced)))
+
+(def +md-quiesce-feature+ (atom false))
+
+(defn md-quiesce-feature? []
+  @+md-quiesce-feature+)
+
+(defn md-quiesce-feature! [on-off]
+  (dp :md-quiesce-feature (if on-off :ON :OFF))
+  (reset! +md-quiesce-feature+ on-off))
+
+(def ^:dynamic *md-quiesce-log?* false)
+
+(defn md-quiesce!
+  ([me] (md-quiesce! me (md-quiesce-feature?)))
+  ([me force?]
+   (when force?
+     (dpx :mdq? (minfo me) (:fx$quiesce (meta me)))
+     (when (not= :never (:fx$quiesce (meta me)))
+       (when *md-quiesce-log?*
+         (dp :md-quiescing (minfo me) #_#_:meta (meta me)))
+       (wtrx [0 999 nil :mdq-entry (minfo me)]
+         (binding [*md-quiescing* true
+                   *md-quiesce-log?* false]
+           (cond
+             (and (coll? me) (mref? (first me)))
+             (doseq [elt me]
+               (md-quiesce! elt true))
+             :else
+             (when (mref? me)
+               (md-quiesce-self! me)))))))))
+

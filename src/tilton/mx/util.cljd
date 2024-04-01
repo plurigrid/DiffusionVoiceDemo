@@ -1,0 +1,174 @@
+(ns tilton.mx.util
+  (:require [cljd.string :as str :refer [join]]
+            [clojure.walk :as walk]
+            [tilton.mx.model.peek :refer [chk]]
+            [tilton.mx.base :as utm
+             :refer [prog1 wtrx dp]]))
+
+(defn now []
+  (.now DateTime))
+
+(defn now-ms []
+  (.-millisecondsSinceEpoch (.now DateTime)))
+
+(def ^:dynamic *bam* nil)
+
+(defn xor [a b]
+  (or (and a (not b))
+    (and b (not a))))
+
+;; (declare pln xpln)
+
+(defn set-ify [x]
+  (cond
+    (nil? x) #{}
+    (sequential? x) (set x)
+    :else #{x}))
+
+(defn cl-find [sought coll]
+  (when-not (nil? sought)
+    (some #{sought} coll)))
+
+;; --- refs with maps conveniences -------------------
+
+(defn atom? [x]
+  (dart/is? x cljd.core/Atom))
+
+(defn mut-set!
+  ([mut prop new-value] (mut-set! mut prop new-value nil))
+  ([mut prop new-value tag]
+   (chk (atom? mut)
+     "util.core/mut-set!> prop:" prop :tag tag
+     "new-value:" new-value
+     "failed assertion any-ref? on ref:")
+   (when-not (map? @mut)
+     (pln "util.core/mut-set!> prop:" prop :tag tag
+       "new-value:" (or new-value :NIL)
+       "failed assertion map? on ref:")
+     (chk false))
+   (swap! mut assoc prop new-value)
+   new-value))
+
+(defn rmap-set! [[prop ref] new-value]
+  (chk (atom? ref)
+    "model.util.core/rmap-set!> prop:" prop
+    "new-value:"                                            ;; new-value
+    "failed assertion atom? on ref:")
+  (chk (map? (deref ref))
+    "model.util.core/rmap-set!> prop " prop
+    " new-value "                                           ;; new-value
+    " failed assertion map? on ref: " " <<<")
+  (swap! ref assoc prop new-value)
+  new-value)
+
+(defn rmap-meta-set! [[prop ref] new-value]
+  (chk (atom? ref)
+    "rmap-meta-set!> prop:" prop
+    "new-value:" #_new-value
+    "failed assertion atom? on ref:")
+  (alter-meta! ref assoc prop new-value)
+  new-value)
+
+;; --- deftest support ---------------------
+;; These next two are lame because they just
+;; look at slots (ignoring models). Use only
+;; in tests looking at one model or at least
+;; prop names do not duplicate.
+;;
+
+(defn prop-users [me prop]
+  (set (map :slotq
+         (map deref
+           (:callers @(prop @me) #{})))))
+
+(defn prop-useds [me prop]
+  (set (map :prop
+         (map deref
+           (:useds @(prop @me) #{})))))
+
+;;; --- FIFO Queue -----------------------------
+
+(defn make-fifo-queue []
+  (atom []))
+
+(defn fifo-data [q] @q)
+
+(defn fifo-clear [q]
+  (reset! q []))
+
+(defn fifo-empty? [q]
+  (empty? @q))
+
+(defn fifo-peek [q]
+  (first @q))
+
+(defn fifo-add [q new]
+  (swap! q conj new))
+
+(defn fifo-pop [q]
+  (when-not (fifo-empty? q)
+    (let [val (first @q)]
+      (swap! q #(vec (rest %)))
+      val)))
+
+;;; --- detritus ----------------------
+
+(defn ensure-vec [x]
+  (if (coll? x) (vec x) [x]))
+
+(defn pln [& args]
+  (do                                                       ;; locking *out*
+    (dp (join " " args))))
+
+(defn xpln [& args])
+
+(defn eko [key value]
+  (pln :eko!!! key value)
+  value)
+
+(def ^:dynamic *plnk-keys* [])
+
+(defn plnk [k & r]
+  (if (string? (first r))
+    (dp (pr-str r))
+    (when (or (= k :force)
+            (some #{k} [*plnk-keys*]))                      ;; [:qxme :addk])
+      (dp (pr-str r)))))
+
+(defn now []
+  (.now dart:core/DateTime))
+
+;;; --- dart maps ---------------------------
+
+(defn dart-map->cljd-map [dart-map]
+  (walk/keywordize-keys
+    (into {} dart-map)))
+
+;;; --- counting ----------------
+
+(def counts (atom nil))
+
+(defn counts-dump [tag]
+  (dp :COUNTS-DUMP!!!!!!!!!!> tag)
+  (doseq [[k v] @counts]
+    (dp :COUNTS-DUMP!!!!!!!!!!> k v)))
+
+(defn counts-reset []
+  (reset! counts nil))
+
+(defn countit "Count-it"
+  ([path]
+   (countit path 1))
+  ([path n]
+   ; (dp :countit-sees path n)
+   (if (sequential? path)
+     (if false                                              ; (counted? n)
+       (countit path (count n))
+       (do
+         ; (dp :countit!! n path)
+         (swap! counts update-in path (fnil + 0) n)))
+     (countit [path] n))))
+
+(defn difference [s so]
+  (set (remove so s)))
+
