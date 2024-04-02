@@ -21,70 +21,76 @@
    "filler_words" false
    "punctuation" true})
 
-(def deep-gram-api-key <INSERT API KEY>)
+(def deep-gram-api-key DEEPGRAM_API_KEY_HERE)
 
 ;; init listening stream
 ;; Stream<List<int>> stream = await MicStream.microphone(sampleRate: 44100); ;; DART CODE
-(defn init-mic-stream [] 
+(defn init-mic-stream []
   (.shouldRequestPermission micstream/MicStream true)
-  (.listen (micstream/MicStream.microphone .sampleRate 44100) (fn [result] result))
-  )
+  (.listen (micstream/MicStream.microphone .sampleRate 44100) (fn [result] result)))
 
 ;; init deep gram
 (defn init-deepgram [api-key params] (deepgram/Deepgram api-key .baseQueryParams params))
 
 
 ;; send the mic-stream to the api using the deepgram class
+;; // -------------------- From a stream  --------------------
+;; Stream<String> jsonStream = deepgram.transcribeFromLiveAudioStream(mic.stream);
 (defn deep-stream [deepgram mic-stream]
-  println mic-stream
+  println (.runtimeType mic-stream)
+  println (.cast mic-stream)
+  ;; println (as mic-stream Stream<List<int>>)
   ;; (cF+
   ;;  [:watch (fn [_ _ new-value _ _]
   ;;              ; Make your invokeMethod calls here.
   ;;            (println "Stream returned:" new-value))]
   ;;  )
-  ;; (.transcribeFromLiveAudioStream deepgram (.-stream mic-stream))
+  ;; (.transcribeFromLiveAudioStream deepgram mic-stream)
   )
 
 
 (defn make-app []
-  (material-app {} 
-      {:name          :app
-       :deepgramapikey deep-gram-api-key
-       :params        params             
-       :mic-stream    (init-mic-stream)
-       :dg-class      (init-deepgram deep-gram-api-key params)
-       :dg-stream     (cF+
-                       [:watch (fn [_ _ new-value _ _]
+  (material-app {}
+                {:name          :app
+                 :deepgramapikey deep-gram-api-key
+                 :params        params
+                 :mic-stream    (init-mic-stream)
+                 :dg-class      (init-deepgram deep-gram-api-key params)
+                 :dg-stream     (cF+
+                                 [:watch (fn [_ _ new-value _ _]
                          ; first time nil, 
                          ; then Stream<List<int>>
-                                 (when-not (nil? new-value)
-                                   (println "Stream returned:" new-value)))]
-                       (deep-stream (mget me :dg-class) (mget me :mic-stream)))
-       }
-               (selection-area
-                (scaffold
-                 {:appBar (app-bar {:title (m/Text "TopOS Demo")})}
-                 (column {:crossAxisAlignment m/CrossAxisAlignment.stretch}
-                         (container
-                          {;:color m/Colors.yellow
-                           :padding (m/EdgeInsets.symmetric .horizontal 16.0)}
-                          (fx/text {:textAlign m/TextAlign.center}
-                                   {:name     :textinput}
-                                   (mget (fasc :app) :deepgramapikey)))
-                         (fx/sized-box {:height 30})
-                         (fx/gesture-detector
-                          {:onTap (dart-cb [] (do
-                                                ;; (await (init-mic-stream))
-                                                (println "tapped")))}
-                          (container
-                           {:margin (m/EdgeInsets.only .bottom 24)
-                            :decoration (m/BoxDecoration
-                                         .border (.all m/Border .width 0.5)
-                                         .borderRadius (m/BorderRadius.all (m.Radius/circular 4.0)))}
-                           (fx/text {:textAlign m/TextAlign.center}
-                                    {:name     :start-mic-butt}
-                                    "Start Mic")))
+                                           (when-not (nil? new-value)
+                                             (println "Stream returned:" new-value)))]
+                                 (deep-stream (mget me :dg-class) (mget me :mic-stream)))}
+                (selection-area
+                 (scaffold
+                  {:appBar (app-bar {:title (m/Text "TopOS Demo")})}
 
-                         (fx/text {:textAlign m/TextAlign.center}
-                                  {:name     :textinput}
-                                  (str (mget (fasc :app) :params))))))))
+                  (row
+                   {:mainAxisAlignment m/MainAxisAlignment.center}
+                   (column {:crossAxisAlignment m/CrossAxisAlignment.center}
+                           (container
+                            {;:color m/Colors.yellow
+                             :padding (m/EdgeInsets.symmetric .horizontal 16.0)}
+                            (fx/text {:textAlign m/TextAlign.center}
+                                     {:name     :textinput}
+                                     (mget (fasc :app) :deepgramapikey)))
+                           (fx/sized-box {:height 10})
+                           (row
+                            (icon-button
+                             {:key         (m/ValueKey "mic")
+                              :iconSize    30
+                              :icon        (fx/icon m/Icons.mic)
+                              :color       m/Colors.blue
+                              :onPressed   (fn [] (println "pressed mic" (deep-stream (mget (fasc :app) :dg-class) (mget (fasc :app) :mic-stream))))})
+                            (icon-button
+                             {:key         (m/ValueKey "mic2")
+                              :iconSize    30
+                              :icon        (fx/icon m/Icons.add)
+                              :color       m/Colors.green
+                              :onPressed   (fn [] (println "pressed add"))}))
+
+                           (fx/text {:textAlign m/TextAlign.center}
+                                    {:name     :textinput}
+                                    (str (mget (fasc :app) :params)))))))))
